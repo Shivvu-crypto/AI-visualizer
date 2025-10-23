@@ -1,90 +1,139 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Data Visualizer</title>
-    <!-- 1. Load Tailwind CSS for modern styling -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        /* Simple loader for the submit button */
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .loader {
-            border: 4px solid rgba(255, 255, 255, 0.3);
-            border-top-color: #fff;
-            border-radius: 50%;
-            width: 24px;
-            height: 24px;
-            animation: spin 1s linear infinite;
-        }
-    </style>
-</head>
-<body class="bg-gray-100 font-sans p-4 md:p-8">
+import asyncio
+import aiohttp
+import io
+import pandas as pd
+import plotly.express as px
+from flask import Flask, render_template, request
+import json # Import the json library
 
-    <div class="max-w-5xl mx-auto bg-white rounded-lg shadow-2xl p-6 md:p-10">
-        
-        <h1 class="text-3xl md:text-4xl font-bold text-gray-800 mb-2 text-center">AI-Powered Data Visualizer</h1>
-        <p class="text-lg text-gray-600 mb-8 text-center">From News Articles to Insightful Graphs, Instantly.</p>
+# --- Block 1: Setup ---
+app = Flask(__name__)
 
-        <!-- The Main Form -->
-        <!-- We add an 'onsubmit' event to show the loader -->
-        <form action="/" method="post" onsubmit="showLoader()">
+# --- Block 2: AI Configuration (CRITICAL CHANGES) ---
+SYSTEM_PROMPT = """
+You are an automated data extraction bot.
+Your ONLY job is to find structured data and return it as a CSV.
+You MUST follow these rules:
+1.  The first line MUST be the CSV headers.
+2.  You MUST NOT add any introduction, explanation, or notes.
+3.  If you find no data, you MUST return the single string: "Error: No structured data found."
+4.  Do not use any formatting like markdown.
+"""
+
+# THIS IS THE CORRECT API URL FOR THIS ENVIRONMENT
+API_URL = "https://generativelen.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=AIzaSyAU6Z3CSRSS9XdcLn7TTTEQwUVSlGgUilg"
+
+# THIS IS THE MOST IMPORTANT PART: LEAVE THE KEY EMPTY.
+# The server will provide it automatically. DO NOT PASTE YOUR OWN KEY.
+API_KEY = "AIzaSyAU6Z3CSRSS9XdcLn7TTTEQwUVSlGgUilg" 
+
+# --- Block 3: Asynchronous AI Call Function ---
+async def call_gemini(article_text):
+    """Makes an async call to the Gemini API to extract data."""
+    
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": article_text}]}],
+    }
+    
+    full_api_url = API_URL + API_KEY
+    
+    async with aiohttp.ClientSession() as session:
+        for i in range(3): # Max 3 retries
+            try:
+                async with session.post(full_api_url, json=payload, headers={'Content-Type': 'application/json'}) as response:
+                    
+                    if response.status != 200:
+                        # If we get a bad status, try to read the error message from Google
+                        error_text = await response.text()
+                        return f"Error: API call failed with status {response.status}. Response: {error_text}"
+
+                    result_text = await response.text()
+                    
+                    try:
+                        result = json.loads(result_text)
+                    except json.JSONDecodeError:
+                        return f"Error: Failed to decode AI response. Response was: {result_text}"
+
+                    if result.get('candidates'):
+                        return result['candidates'][0]['content']['parts'][0]['text']
+                    else:
+                        if result.get('promptFeedback'):
+                             return f"Error: AI call blocked. Reason: {result['promptFeedback']['blockReason']}"
+                        return f"Error: Invalid API response structure. Response: {result_text}"
+
+            except aiohttp.ClientError as e:
+                if i == 2:
+                    return f"Error: API call failed after retries. Check internet connection. {e}"
+                await asyncio.sleep(2**i)
+                
+    return "Error: Could not contact AI service after all retries."
+
+
+# --- Block 4: The Main Route (Handles everything) ---
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    # These variables will be sent to the HTML
+    extracted_data = ""
+    column_headers = []
+    graph_html = None
+    error_message = None
+
+    try:
+        if request.method == 'POST':
+            data_from_textarea = request.form.get('data_textarea', '')
+            chart_type = request.form.get('chart_type', 'bar')
+            x_col = request.form.get('x_col')
+            y_col = request.form.get('y_col')
             
-            <label for="article_input" class="block text-xl font-semibold text-gray-700 mb-3">
-                Step 1: Paste a News Article Below
-            </label>
+            if 'extract_button' in request.form:
+                article_text = request.form['article_content']
+                if not article_text:
+                    raise Exception("Please paste an article first.")
+                
+                extracted_data = asyncio.run(call_gemini(article_text))
+                
+                if extracted_data.startswith('Error:'):
+                    raise Exception(extracted_data)
+                
+                try:
+                    df = pd.read_csv(io.StringIO(extracted_data))
+                    column_headers = df.columns.tolist()
+                except Exception as e:
+                    raise Exception(f"AI returned data, but Pandas couldn't read it. Error: {e} | AI Data: '{extracted_data}'")
 
-            <textarea name="article_content" id="article_input" rows="15" class="w-full p-4 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-base" placeholder="Paste your full article text here..." required></textarea>
-            
-            <button id="submit-button" type="submit" class="w-full mt-5 bg-blue-600 text-white font-bold py-4 px-6 rounded-lg shadow-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-300 ease-in-out flex items-center justify-center space-x-3 text-lg">
-                <span id="button-text">Generate Visualization ✨</span>
-                <div id="loader" class="loader hidden"></div>
-            </button>
-        </form>
+            elif 'visualize_button' in request.form:
+                if not data_from_textarea:
+                    raise Exception("Please extract data first.")
+                if not x_col or not y_col:
+                    raise Exception("Please select X-Axis and Y-Axis.")
 
-        <!-- 
-          THIS IS THE DYNAMIC PART
-          These sections will ONLY appear if the Python backend
-          sends them (i.e., after you submit the form).
-        -->
+                extracted_data = data_from_textarea
+                data_file = io.StringIO(extracted_data)
+                df = pd.read_csv(data_file)
+                column_headers = df.columns.tolist()
 
-        <!-- 1. The Error Message Section -->
-        {% if error_message %}
-            <div class="mt-10 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">
-                <strong class="font-bold">An Error Occurred:</strong>
-                <span class="block">{{ error_message }}</span>
-            </div>
-        {% endif %}
+                fig = None
+                if chart_type == 'bar':
+                    fig = px.bar(df, x=x_col, y=y_col, title=f"Bar Chart of {y_col} by {x_col}")
+                elif chart_type == 'line':
+                    fig = px.line(df, x=x_col, y=y_col, title=f"Line Chart of {y_col} by {x_col}")
+                elif chart_type == 'pie':
+                    fig = px.pie(df, names=x_col, values=y_col, title=f"Pie Chart of {y_col}")
+                
+                if fig:
+                    fig.update_layout(paper_bgcolor='white', plot_bgcolor='white')
+                    graph_html = fig.to_html(full_html=False)
 
-        <!-- 2. The Graph Section -->
-        {% if graph_html %}
-            <div class="mt-12 border-t-2 pt-8">
-                <h2 class="text-2xl font-bold text-gray-800 mb-4">Step 2: Generated Visualization</h2>
-                <!-- This is where the Plotly graph is injected -->
-                <div class="border rounded-lg shadow-md overflow-hidden">
-                    {{ graph_html | safe }}
-                </div>
-            </div>
-        {% endif %}
+    except Exception as e:
+        error_message = f"An error occurred: {e}"
 
-        <!-- 3. The Raw Data Section -->
-        {% if extracted_data %}
-            <div class="mt-8">
-                <h3 class="text-xl font-semibold text-gray-700 mb-3">Extracted Raw Data (CSV)</h3>
-                <pre class="w-full p-4 bg-gray-50 border border-gray-200 rounded-lg shadow-inner overflow-auto max-h-60 whitespace-pre-wrap font-mono text-sm text-gray-700">{{ extracted_data }}</pre>
-            </div>
-        {% endif %}
-        
-    </div>
+    return render_template('index_ai.html',
+                           graph_html=graph_html,
+                           extracted_data=extracted_data,
+                           column_headers=column_headers,
+                           error_message=error_message)
 
-    <!-- JavaScript to show the loader -->
-    <script>
-        function showLoader() {
-            document.getElementById('button-text').textContent = 'Processing... Please Wait...';
-            document.getElementById('loader').classList.remove('hidden');
-            document.getElementById('submit-button').disabled = true;
-        }
-    </script>
-
-</body>
-</html>
+# --- Block 5: The "Run" Command ---
+if __name__ == '__main__':
+    app.run(debug=True)
