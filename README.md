@@ -21,7 +21,3 @@ Data Processing: Pandas
 Data Visualization: Plotly
 AI & Asynchronous Requests: Google Gemini API & aiohttp
 Frontend: HTML, Tailwind CSS, Jinja2
-Getting Started
-To get a local copy up and running, follow these simple steps.
-Prerequisites
-You must have Python 3.7+ installed on your system.
