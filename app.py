@@ -1,140 +1,139 @@
-import asyncio  # For handling API calls without freezing the app
-import aiohttp  # For making asynchronous web requests
-import io       # For reading text as if it were a file
+import asyncio
+import aiohttp
+import io
 import pandas as pd
 import plotly.express as px
 from flask import Flask, render_template, request
+import json # Import the json library
 
-# --- Block 1: The Import Statements & Setup ---
-app = Flask(_name_)
+# --- Block 1: Setup ---
+app = Flask(__name__)
 
-# --- Block 2: The Gemini AI Configuration ---
-# This is the "brain" of our AI. 
-# We are giving it a very specific, two-part job.
+# --- Block 2: AI Configuration (CRITICAL CHANGES) ---
 SYSTEM_PROMPT = """
-
-
-PART 1: The Data
-- Extract any structured data you find in the article.
-- Format this data as a clean, simple CSV (Comma Separated Values).
-- The first row MUST be the column headers.
-
-PART 2: The Chart Suggestion
-- After the CSV data, add a separator line: '---CHART---'
-- On a new line, suggest the best chart type.
-- On the next line, suggest the best column for the X-AXIS.
-- On the next line, suggest the best column for the Y-AXIS.
-
-EXAMPLE RESPONSE:
-State,Literacy Rate,Internet Penetration
-Kerala,94.0,63.0
-Delhi,86.2,68.0
-Mizoram,91.3,55.0
----CHART---
-bar
-State
-Literacy Rate
+You are an automated data extraction bot.
+Your ONLY job is to find structured data and return it as a CSV.
+You MUST follow these rules:
+1.  The first line MUST be the CSV headers.
+2.  You MUST NOT add any introduction, explanation, or notes.
+3.  If you find no data, you MUST return the single string: "Error: No structured data found."
+4.  Do not use any formatting like markdown.
 """
 
-# The API URL and Key
-API_URL = "https://generativelen.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key="
-API_KEY = "" # Handled by the environment
+# THIS IS THE CORRECT API URL FOR THIS ENVIRONMENT
+API_URL = "https://generativelen.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=AIzaSyAU6Z3CSRSS9XdcLn7TTTEQwUVSlGgUilg"
 
-# --- Block 3: The Asynchronous AI Call Function ---
-# This function calls the Gemini API
+# THIS IS THE MOST IMPORTANT PART: LEAVE THE KEY EMPTY.
+# The server will provide it automatically. DO NOT PASTE YOUR OWN KEY.
+API_KEY = "AIzaSyAU6Z3CSRSS9XdcLn7TTTEQwUVSlGgUilg" 
+
+# --- Block 3: Asynchronous AI Call Function ---
 async def call_gemini(article_text):
+    """Makes an async call to the Gemini API to extract data."""
+    
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"parts": [{"text": article_text}]}],
     }
     
-    # We use aiohttp for an async request
+    full_api_url = API_URL + API_KEY
+    
     async with aiohttp.ClientSession() as session:
-        # Exponential backoff for retries
         for i in range(3): # Max 3 retries
             try:
-                async with session.post(API_URL + API_KEY, json=payload) as response:
-                    response.raise_for_status() # Raise error for bad responses
-                    result = await response.json()
+                async with session.post(full_api_url, json=payload, headers={'Content-Type': 'application/json'}) as response:
                     
+                    if response.status != 200:
+                        # If we get a bad status, try to read the error message from Google
+                        error_text = await response.text()
+                        return f"Error: API call failed with status {response.status}. Response: {error_text}"
+
+                    result_text = await response.text()
+                    
+                    try:
+                        result = json.loads(result_text)
+                    except json.JSONDecodeError:
+                        return f"Error: Failed to decode AI response. Response was: {result_text}"
+
                     if result.get('candidates'):
                         return result['candidates'][0]['content']['parts'][0]['text']
                     else:
-                        raise Exception("Invalid API response structure")
+                        if result.get('promptFeedback'):
+                             return f"Error: AI call blocked. Reason: {result['promptFeedback']['blockReason']}"
+                        return f"Error: Invalid API response structure. Response: {result_text}"
 
             except aiohttp.ClientError as e:
-                if i == 2: # Last retry
-                    return f"Error: API call failed after retries. {e}"
-                await asyncio.sleep(2**i) # 1s, 2s
-    return "Error: Could not contact AI service."
+                if i == 2:
+                    return f"Error: API call failed after retries. Check internet connection. {e}"
+                await asyncio.sleep(2**i)
+                
+    return "Error: Could not contact AI service after all retries."
 
 
 # --- Block 4: The Main Route (Handles everything) ---
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    # These variables will be sent to the HTML file
+    # These variables will be sent to the HTML
+    extracted_data = ""
+    column_headers = []
     graph_html = None
-    extracted_data = None
     error_message = None
 
-    if request.method == 'POST':
-        try:
-            article_text = request.form['article_content']
+    try:
+        if request.method == 'POST':
+            data_from_textarea = request.form.get('data_textarea', '')
+            chart_type = request.form.get('chart_type', 'bar')
+            x_col = request.form.get('x_col')
+            y_col = request.form.get('y_col')
             
-            # 1. Call the AI and get the response
-            # We use asyncio.run() to execute our async function
-            ai_response = asyncio.run(call_gemini(article_text))
+            if 'extract_button' in request.form:
+                article_text = request.form['article_content']
+                if not article_text:
+                    raise Exception("Please paste an article first.")
+                
+                extracted_data = asyncio.run(call_gemini(article_text))
+                
+                if extracted_data.startswith('Error:'):
+                    raise Exception(extracted_data)
+                
+                try:
+                    df = pd.read_csv(io.StringIO(extracted_data))
+                    column_headers = df.columns.tolist()
+                except Exception as e:
+                    raise Exception(f"AI returned data, but Pandas couldn't read it. Error: {e} | AI Data: '{extracted_data}'")
 
-            # 2. Split the AI response into its two parts
-            if '---CHART---' not in ai_response:
-                raise Exception("AI did not return a valid response. " + ai_response)
+            elif 'visualize_button' in request.form:
+                if not data_from_textarea:
+                    raise Exception("Please extract data first.")
+                if not x_col or not y_col:
+                    raise Exception("Please select X-Axis and Y-Axis.")
 
-            parts = ai_response.split('---CHART---')
-            csv_data = parts[0].strip()
-            chart_info = parts[1].strip().split('\n')
-            
-            # 3. Parse the AI suggestions
-            chart_type = chart_info[0].strip()
-            x_col = chart_info[1].strip()
-            y_col = chart_info[2].strip()
-            
-            # 4. Use PANDAS to read the CSV data
-            # io.StringIO tricks pandas into reading our string as a file
-            data_file = io.StringIO(csv_data)
-            df = pd.read_csv(data_file)
-            
-            # Store the raw CSV to show the user
-            extracted_data = csv_data
+                extracted_data = data_from_textarea
+                data_file = io.StringIO(extracted_data)
+                df = pd.read_csv(data_file)
+                column_headers = df.columns.tolist()
 
-            # 5. Use PLOTLY to create the suggested graph
-            fig = None
-            if chart_type == 'bar':
-                fig = px.bar(df, x=x_col, y=y_col, title=f"Bar Chart of {y_col} by {x_col}")
-            elif chart_type == 'line':
-                fig = px.line(df, x=x_col, y=y_col, title=f"Line Chart of {y_col} by {x_col}")
-            elif chart_type == 'pie':
-                # Pie charts use 'names' and 'values'
-                fig = px.pie(df, names=x_col, values=y_col, title=f"Pie Chart of {y_col}")
-            else:
-                # Default to bar chart if suggestion is weird
-                fig = px.bar(df, x=x_col, y=y_col, title=f"Chart of {y_col} by {x_col}")
-            
-            # 6. Convert the graph to HTML
-            if fig:
-                graph_html = fig.to_html(full_html=False)
+                fig = None
+                if chart_type == 'bar':
+                    fig = px.bar(df, x=x_col, y=y_col, title=f"Bar Chart of {y_col} by {x_col}")
+                elif chart_type == 'line':
+                    fig = px.line(df, x=x_col, y=y_col, title=f"Line Chart of {y_col} by {x_col}")
+                elif chart_type == 'pie':
+                    fig = px.pie(df, names=x_col, values=y_col, title=f"Pie Chart of {y_col}")
+                
+                if fig:
+                    fig.update_layout(paper_bgcolor='white', plot_bgcolor='white')
+                    graph_html = fig.to_html(full_html=False)
 
-        except Exception as e:
-            # Handle any errors
-            error_message = f"An error occurred: {e}"
+    except Exception as e:
+        error_message = f"An error occurred: {e}"
 
-    # 7. Render the page
-    # If it was a GET request, it just shows the form.
-    # If it was a POST, it now includes the graph, data, and/or an error.
-    return render_template('index_ai.html', 
-                           graph_html=graph_html, 
-                           extracted_data=extracted_data, 
+    return render_template('index_ai.html',
+                           graph_html=graph_html,
+                           extracted_data=extracted_data,
+                           column_headers=column_headers,
                            error_message=error_message)
 
 # --- Block 5: The "Run" Command ---
-if _name_ == '_main_':
+if __name__ == '__main__':
     app.run(debug=True)
