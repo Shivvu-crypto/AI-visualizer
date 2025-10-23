@@ -21,7 +21,7 @@ You MUST follow these rules:
 """
 
 # THIS IS THE CORRECT API URL FOR THIS ENVIRONMENT
-API_URL = "https://generativelen.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=AIzaSyAU6Z3CSRSS9XdcLn7TTTEQwUVSlGgUilg"
+API_URL = "https://generativelen.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key="
 
 # THIS IS THE MOST IMPORTANT PART: LEAVE THE KEY EMPTY.
 # The server will provide it automatically. DO NOT PASTE YOUR OWN KEY.
@@ -137,3 +137,4 @@ def index():
 # --- Block 5: The "Run" Command ---
 if __name__ == '__main__':
     app.run(debug=True)
+
